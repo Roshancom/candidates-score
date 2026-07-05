@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -10,12 +11,18 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 
-SECRET_KEY = "techkraft-secret-key-change-in-production"
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET_KEY:
+    raise RuntimeError(
+        "JWT_SECRET_KEY environment variable is not set. "
+        "Generate a secure key with: openssl rand -hex 32"
+    )
+SECRET_KEY = JWT_SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -37,10 +44,23 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    token: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
+    """Get the current user from the JWT token.
+    Token can be provided via Authorization header (Bearer) or ?token= query param.
+    The query param fallback is needed for SSE/EventSource connections which
+    cannot set custom headers.
+    """
+    if credentials:
+        token = credentials.credentials
+    elif not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -73,3 +93,7 @@ def require_role(required_role: str):
             )
         return current_user
     return role_checker
+
+
+require_admin = require_role("admin")
+require_reviewer = require_role("reviewer")

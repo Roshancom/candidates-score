@@ -73,8 +73,12 @@ export async function generateSummary(apiFetch, candidateId) {
   return apiFetch(`/candidates/${candidateId}/summary`, { method: 'POST' });
 }
 
-export async function getReviewCandidates(apiFetch) {
-  return apiFetch('/candidates/review');
+export async function getReviewCandidates(apiFetch, params = {}) {
+  const query = new URLSearchParams();
+  if (params.page) query.set('page', String(params.page));
+  if (params.page_size) query.set('page_size', String(params.page_size));
+  const qs = query.toString();
+  return apiFetch(`/candidates/review${qs ? `?${qs}` : ''}`);
 }
 
 // -------- Admin Seed Data --------

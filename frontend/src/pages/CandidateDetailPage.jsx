@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../api/auth';
 import { getCandidate, submitScore, updateScore, adminUpdateScore, generateSummary, updateCandidate, getNotifications } from '../api/client';
+import StatusBadge from '../components/StatusBadge';
 
 const SCORE_CATEGORIES = [
   'Technical Skills',
@@ -49,10 +50,22 @@ export default function CandidateDetailPage() {
     }
   }, [candidate?.scores]);
 
-  // AI Summary
+  // AI Summary — initialize from cached data if present
   const [summary, setSummary] = useState('');
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState('');
+  const [hasCachedSummary, setHasCachedSummary] = useState(false);
+
+  // When candidate data loads, check for existing cached summary
+  useEffect(() => {
+    if (candidate?.ai_summary) {
+      setSummary(candidate.ai_summary);
+      setHasCachedSummary(true);
+    } else {
+      setSummary('');
+      setHasCachedSummary(false);
+    }
+  }, [candidate?.ai_summary]);
 
   // Internal notes (admin only)
   const [internalNotes, setInternalNotes] = useState('');
@@ -214,6 +227,7 @@ export default function CandidateDetailPage() {
     try {
       const data = await generateSummary(apiFetch, id);
       setSummary(data.summary);
+      setHasCachedSummary(true);
     } catch (err) {
       setSummaryError(err.message || 'Failed to generate summary');
     } finally {
@@ -233,16 +247,7 @@ export default function CandidateDetailPage() {
     }
   };
 
-  const statusBadgeClass = (status) => {
-    const map = {
-      new: 'badge-new',
-      reviewed: 'badge-reviewed',
-      hired: 'badge-hired',
-      rejected: 'badge-rejected',
-      archived: 'badge-archived',
-    };
-    return `badge ${map[status] || 'badge-new'}`;
-  };
+  // StatusBadge component used instead of inline statusBadgeClass
 
   if (loading) {
     return (
@@ -301,9 +306,7 @@ export default function CandidateDetailPage() {
               <h2 style={{ fontSize: 'var(--font-size-xl)', fontWeight: 600, color: 'var(--color-primary)' }}>
                 {candidate.name}
               </h2>
-              <span className={statusBadgeClass(candidate.status)}>
-                {candidate.status}
-              </span>
+              <StatusBadge status={candidate.status} />
             </div>
             <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div>
@@ -399,9 +402,17 @@ export default function CandidateDetailPage() {
                     Generating...
                   </>
                 ) : (
-                  'Generate Summary'
+                  hasCachedSummary ? 'Regenerate Summary' : 'Generate Summary'
                 )}
               </button>
+
+              {hasCachedSummary && !summaryLoading && (
+                <p style={{ fontSize: 11, color: 'var(--color-text-secondary)', marginTop: 8 }}>
+                  Summary was previously generated{candidate?.ai_summary_generated_at
+                    ? ` on ${new Date(candidate.ai_summary_generated_at).toLocaleDateString()}`
+                    : ''}. Click <strong>Regenerate</strong> to create a new one.
+                </p>
+              )}
 
               {summaryLoading && (
                 <div style={{ marginTop: 16 }}>

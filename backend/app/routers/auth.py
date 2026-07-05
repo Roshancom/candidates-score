@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import UserCreate, UserLogin, TokenResponse, UserResponse
-from app.auth import hash_password, verify_password, create_access_token, get_current_user
+from app.auth import hash_password, verify_password, create_access_token, get_current_user, require_admin
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -56,14 +56,9 @@ def get_me(current_user: User = Depends(get_current_user)):
 @router.get("/users/reviewers", response_model=list[UserResponse])
 def list_reviewers(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """List all users with reviewer role."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can list reviewers",
-        )
     reviewers = db.query(User).filter(User.role == "reviewer").all()
     return reviewers
 

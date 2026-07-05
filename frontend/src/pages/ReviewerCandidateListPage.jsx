@@ -2,6 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../api/auth';
 import { getReviewCandidates } from '../api/client';
+import PaginationFooter from '../components/PaginationFooter';
+
+const PAGE_SIZE = 20;
 
 export default function ReviewerCandidateListPage() {
   const { apiFetch, user } = useAuth();
@@ -10,8 +13,11 @@ export default function ReviewerCandidateListPage() {
   const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState({ page: 1, page_size: 20, total_count: 0, total_pages: 0 });
 
   const currentUserId = user?.id;
+  const { total_count: totalCount, total_pages: totalPages } = pagination;
 
   // Wait for user data to load so we have an accurate currentUserId for split logic
   if (!currentUserId) {
@@ -29,14 +35,15 @@ export default function ReviewerCandidateListPage() {
     setLoading(true);
     setError('');
     try {
-      const data = await getReviewCandidates(apiFetch);
-      setCandidates(data);
+      const data = await getReviewCandidates(apiFetch, { page, page_size: PAGE_SIZE });
+      setCandidates(data.data);
+      setPagination(data.pagination);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [apiFetch]);
+  }, [apiFetch, page]);
 
   useEffect(() => {
     fetchCandidates();
@@ -144,6 +151,15 @@ export default function ReviewerCandidateListPage() {
           </div>
         </div>
       )}
+
+      {/* Pagination footer — only show when multiple pages */}
+      <PaginationFooter
+        page={page}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        loading={loading}
+        onPageChange={setPage}
+      />
     </div>
   );
 }

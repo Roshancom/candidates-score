@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.auth import get_current_user
+from app.auth import require_admin
 from app.services.candidate_service import (
     seed_candidates,
     delete_seed_candidates,
@@ -16,14 +16,9 @@ router = APIRouter()
 @router.get("/seed/count", response_model=dict)
 def count_seed_endpoint(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Return count of existing seed data candidates. Admin-only."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access this endpoint",
-        )
     count = count_seed_candidates(db)
     return {"count": count}
 
@@ -31,18 +26,12 @@ def count_seed_endpoint(
 @router.post("/admin/seed", response_model=dict, status_code=status.HTTP_201_CREATED)
 def seed_candidates_endpoint(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """
     Inject 80 realistic fake candidates tagged as seed data.
     Admin-only. Uses a DB transaction.
     """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can seed candidates",
-        )
-
     try:
         candidates, batch_id = seed_candidates(db, count=80)
         return {
@@ -61,18 +50,12 @@ def seed_candidates_endpoint(
 @router.delete("/admin/seed", response_model=dict)
 def delete_seed_candidates_endpoint(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """
     Delete all candidates where is_seed_data=True.
     Admin-only. Uses a strict DB filter to never touch real candidates.
     """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can remove seed candidates",
-        )
-
     try:
         deleted = delete_seed_candidates(db)
         return {

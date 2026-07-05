@@ -12,7 +12,7 @@ from app.schemas import (
     ScoreUpdate,
     SummaryResponse,
 )
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from app.services.candidate_service import (
     get_candidate,
     submit_score,
@@ -21,8 +21,8 @@ from app.services.candidate_service import (
     get_scores_for_candidate,
     get_scores_for_reviewer,
     has_reviewer_submitted_scores,
+    _parse_skills,
 )
-from app.routers.candidates.helpers import _parse_skills
 
 router = APIRouter()
 
@@ -62,15 +62,9 @@ def admin_update_score_endpoint(
     score_id: int,
     data: AdminScoreUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Admin-only score update: edits the numeric score value but preserves the reviewer's original note."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can use this endpoint",
-        )
-
     updated = admin_update_score(db, score_id, data.score)
     if not updated:
         raise HTTPException(
@@ -88,13 +82,29 @@ def submit_score_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     """Submit a score for a candidate."""
+    # First check if candidate exists (including soft-deleted/archived)
+    candidate_exists = db.query(Candidate.id).filter(Candidate.id == candidate_id).first()
+    if not candidate_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
+
+    # Check if candidate is archived — reject scoring
+    archived_candidate = db.query(Candidate).filter(
+        Candidate.id == candidate_id,
+        Candidate.deleted_at.isnot(None),
+    ).first()
+    if archived_candidate:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot score an archived candidate",
+        )
+
     # Bug 2: Permission check - reviewers can only score candidates assigned to them.
     # Allow scoring if candidate is unassigned (assigned_reviewer_id is None).
+    active_candidate = get_candidate(db, candidate_id)
     if current_user.role == "reviewer":
-        candidate = get_candidate(db, candidate_id)
-        if not candidate:
+        if not active_candidate:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
-        if candidate.assigned_reviewer_id is not None and candidate.assigned_reviewer_id != current_user.id:
+        if active_candidate.assigned_reviewer_id is not None and active_candidate.assigned_reviewer_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not authorized to score this candidate",
@@ -122,8 +132,12 @@ async def generate_summary(
 ):
     """
     Mock AI summary generation — simulates an async LLM call with a 2-second delay.
+    The generated summary is persisted to the candidate record and returned in
+    subsequent GET /candidates/{id} responses.
     Respects RBAC: reviewers see only their own scores, admins see all.
     """
+    from datetime import datetime, timezone
+
     candidate = get_candidate(db, candidate_id)
     if not candidate:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
@@ -157,4 +171,10 @@ async def generate_summary(
         f"Average score: {avg_score:.1f}/5 across {len(scores)} review(s). "
         f"This is an AI-generated summary based on available scores and profile data."
     )
+
+    # Persist summary to the candidate record
+    candidate.ai_summary = summary
+    candidate.ai_summary_generated_at = datetime.now(timezone.utc)
+    db.commit()
+
     return SummaryResponse(summary=summary)

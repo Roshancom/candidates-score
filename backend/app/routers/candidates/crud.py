@@ -9,12 +9,11 @@ from app.schemas import (
     CandidateCreate,
     CandidateDetail,
     CandidateListResponse,
-    PaginationInfo,
+    ReviewCandidateListResponse,
     ReviewCandidateListItem,
     CandidateUpdate,
-    ScoreResponse,
 )
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin, require_reviewer
 from app.services.candidate_service import (
     list_candidates,
     get_candidate,
@@ -24,14 +23,15 @@ from app.services.candidate_service import (
     restore_candidate,
     list_archived_candidates,
     list_candidates_for_reviewer,
-    get_scores_for_candidate,
     get_scores_for_reviewer,
-    has_reviewer_submitted_scores,
     candidate_has_any_scores,
     get_candidates_average_scores,
+    serialize_candidate_detail,
+    _parse_skills,
+    _candidate_to_list_item,
 )
 from app.services.notification_service import notify_reviewer_assigned
-from app.routers.candidates.helpers import _parse_skills, _candidate_to_list_item, VALID_STATUSES
+from app.routers.candidates.helpers import make_pagination, VALID_STATUSES
 
 router = APIRouter()
 
@@ -81,41 +81,30 @@ def list_candidates_endpoint(
             item.score_count = score_data[1]
         items.append(item)
 
-    total_pages = max(1, (total + actual_page_size - 1) // actual_page_size) if total > 0 else 0
-
     return CandidateListResponse(
         data=items,
-        pagination=PaginationInfo(
-            page=page,
-            page_size=actual_page_size,
-            total_count=total,
-            total_pages=total_pages,
-        ),
+        pagination=make_pagination(page, actual_page_size, total),
     )
 
 
-@router.get("/review", response_model=list[ReviewCandidateListItem])
+@router.get("/review", response_model=ReviewCandidateListResponse)
 def list_review_candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_reviewer),
 ):
     """
     List candidates assigned to the current reviewer.
-    Reviewer-only endpoint.
+    Reviewer-only endpoint. Returns paginated response with metadata.
     """
-    if current_user.role != "reviewer":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only reviewers can access this endpoint",
-        )
 
+    actual_page_size = max(1, min(page_size, 50))
     candidates, total = list_candidates_for_reviewer(
         db=db,
         reviewer_id=current_user.id,
         page=page,
-        page_size=page_size,
+        page_size=actual_page_size,
     )
 
     result = []
@@ -141,7 +130,10 @@ def list_review_candidates(
             average_score=avg_score,
         ))
 
-    return result
+    return ReviewCandidateListResponse(
+        data=result,
+        pagination=make_pagination(page, actual_page_size, total),
+    )
 
 
 @router.get("/archived", response_model=CandidateListResponse)
@@ -153,17 +145,12 @@ def list_archived_candidates_endpoint(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """List archived (soft-deleted) candidates. Admin-only.
     NOTE: This route MUST be defined BEFORE /{candidate_id} to avoid FastAPI
     matching "archived" as a candidate_id parameter.
     """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can view archived candidates",
-        )
 
     # Validate status
     if status and status not in VALID_STATUSES:
@@ -182,15 +169,23 @@ def list_archived_candidates_endpoint(
         page=page,
         page_size=actual_page_size,
     )
-    total_pages = max(1, (total + actual_page_size - 1) // actual_page_size) if total > 0 else 0
+
+    # Compute average scores across all reviewers for this batch of archived candidates
+    candidate_ids = [c.id for c in candidates]
+    avg_scores = get_candidates_average_scores(db, candidate_ids)
+
+    items = []
+    for c in candidates:
+        item = _candidate_to_list_item(c)
+        score_data = avg_scores.get(c.id)
+        if score_data:
+            item.average_score = score_data[0]
+            item.score_count = score_data[1]
+        items.append(item)
+
     return CandidateListResponse(
-        data=[_candidate_to_list_item(c) for c in candidates],
-        pagination=PaginationInfo(
-            page=page,
-            page_size=actual_page_size,
-            total_count=total,
-            total_pages=total_pages,
-        ),
+        data=items,
+        pagination=make_pagination(page, actual_page_size, total),
     )
 
 
@@ -221,32 +216,7 @@ def get_candidate_endpoint(
             detail="You are not authorized to view this candidate",
         )
 
-    # RBAC: reviewer can only see their own scores, admin sees all
-    if current_user.role == "admin":
-        scores = get_scores_for_candidate(db, candidate_id)
-        internal_notes = candidate.internal_notes
-    else:
-        scores = get_scores_for_reviewer(db, candidate_id, current_user.id)
-        internal_notes = None  # Reviewers cannot see internal notes
-
-    # Determine if current reviewer has submitted any scores
-    is_reviewed = False
-    if current_user.role == "reviewer":
-        is_reviewed = has_reviewer_submitted_scores(db, candidate_id, current_user.id)
-
-    return CandidateDetail(
-        id=candidate.id,
-        name=candidate.name,
-        email=candidate.email,
-        role_applied=candidate.role_applied,
-        status=candidate.status,
-        skills=_parse_skills(candidate),
-        internal_notes=internal_notes,
-        cv_file_url=candidate.cv_file_url,
-        is_reviewed_by_current_user=is_reviewed,
-        created_at=candidate.created_at,
-        scores=[ScoreResponse.model_validate(s) for s in scores],
-    )
+    return serialize_candidate_detail(db, candidate, current_user)
 
 
 @router.post("", response_model=CandidateDetail, status_code=status.HTTP_201_CREATED, response_model_exclude_none=True)
@@ -256,7 +226,12 @@ def create_candidate_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new candidate."""
-    candidate = create_candidate(db, data)
+    # Schema-level validation (name, email format, role, skills) is handled by Pydantic.
+    # Service-level validation (email uniqueness, reviewer existence) is handled here.
+    try:
+        candidate = create_candidate(db, data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     # Notify reviewer if assigned during creation
     if data.assigned_reviewer_id is not None and current_user.role == "admin":
@@ -273,11 +248,16 @@ def update_candidate_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     """Update a candidate (status, internal_notes)."""
-    # Only admins can update internal_notes
+    # Only admins can update internal_notes or status
     if data.internal_notes is not None and current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only admins can update internal notes",
+        )
+    if data.status is not None and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can update candidate status",
         )
 
     # Check if reviewer is being assigned (to trigger notification)
@@ -298,7 +278,10 @@ def update_candidate_endpoint(
             detail="You are not authorized to edit this candidate",
         )
 
-    candidate = update_candidate(db, candidate_id, data)
+    try:
+        candidate = update_candidate(db, candidate_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not candidate:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
 
@@ -317,14 +300,9 @@ def update_candidate_endpoint(
 def delete_candidate_endpoint(
     candidate_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Soft delete a candidate (sets status to archived). Admin-only."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can delete candidates",
-        )
     if not soft_delete_candidate(db, candidate_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
 
@@ -333,14 +311,9 @@ def delete_candidate_endpoint(
 def restore_candidate_endpoint(
     candidate_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Restore an archived candidate. Admin-only."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can restore candidates",
-        )
     if not restore_candidate(db, candidate_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

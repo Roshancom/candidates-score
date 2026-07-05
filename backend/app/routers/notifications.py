@@ -1,10 +1,13 @@
+import asyncio
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import User
+from app.database import get_db, SessionLocal
+from app.models import Notification, User
 from app.schemas import NotificationListResponse, NotificationResponse, NotificationUpdate
 from app.auth import get_current_user
 from app.services.notification_service import (
@@ -46,6 +49,55 @@ def unread_count(
     """Get the count of unread notifications."""
     count = get_unread_count(db, current_user.id)
     return {"unread_count": count}
+
+
+@router.get("/stream")
+async def stream_notifications(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    SSE endpoint that streams new notifications in real time.
+    Polls the DB every 5 seconds for new unread notifications
+    and pushes them to the connected client.
+    """
+    async def event_generator():
+        last_max_id = 0
+        while True:
+            try:
+                db = SessionLocal()
+                try:
+                    # Query for unread notifications newer than the last seen ID
+                    notifs = (
+                        db.query(Notification)
+                        .filter(
+                            Notification.user_id == current_user.id,
+                            Notification.is_read == 0,
+                            Notification.id > last_max_id,
+                        )
+                        .order_by(Notification.id.asc())
+                        .all()
+                    )
+                    if notifs:
+                        for n in notifs:
+                            data = {
+                                "id": n.id,
+                                "user_id": n.user_id,
+                                "type": n.type,
+                                "title": n.title,
+                                "message": n.message,
+                                "candidate_id": n.candidate_id,
+                                "is_read": bool(n.is_read),
+                                "created_at": n.created_at.isoformat() if n.created_at else None,
+                            }
+                            yield {"event": "notification", "data": json.dumps(data)}
+                            last_max_id = max(last_max_id, n.id)
+                finally:
+                    db.close()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+    return EventSourceResponse(event_generator())
 
 
 @router.patch("/read", response_model=dict)

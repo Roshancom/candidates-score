@@ -65,6 +65,12 @@ def migrate_and_seed():
         if "seed_batch_id" not in candidate_cols:
             db.execute(text("ALTER TABLE candidates ADD COLUMN seed_batch_id VARCHAR(36)"))
             print("[migration] Added seed_batch_id column")
+        if "ai_summary" not in candidate_cols:
+            db.execute(text("ALTER TABLE candidates ADD COLUMN ai_summary TEXT"))
+            print("[migration] Added ai_summary column")
+        if "ai_summary_generated_at" not in candidate_cols:
+            db.execute(text("ALTER TABLE candidates ADD COLUMN ai_summary_generated_at DATETIME"))
+            print("[migration] Added ai_summary_generated_at column")
         
         # Ensure notifications table exists (created by SQLAlchemy, but might need migration for existing DB)
         try:

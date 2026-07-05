@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../api/auth';
 import { getCandidates, getArchivedCandidates, deleteCandidate, restoreCandidate, getSeedCount, seedTestCandidates, deleteSeedCandidates } from '../api/client';
+import StatusBadge from '../components/StatusBadge';
+import PaginationFooter from '../components/PaginationFooter';
 
 const STATUS_OPTIONS = ['', 'new', 'reviewed', 'hired', 'rejected', 'archived'];
 const PAGE_SIZE_OPTIONS = [20, 50];
@@ -179,16 +181,7 @@ export default function CandidateListPage() {
     return () => clearTimeout(timer);
   }, [successMessage]);
 
-  const statusBadgeClass = (status) => {
-    const map = {
-      new: 'badge-new',
-      reviewed: 'badge-reviewed',
-      hired: 'badge-hired',
-      rejected: 'badge-rejected',
-      archived: 'badge-archived',
-    };
-    return `badge ${map[status] || 'badge-new'}`;
-  };
+  // StatusBadge is used instead of inline statusBadgeClass
 
   const handleDelete = async () => {
     if (!confirmCandidate) return;
@@ -408,7 +401,7 @@ export default function CandidateListPage() {
                     <td style={{ fontWeight: 500 }}>{candidate.name}</td>
                     <td style={{ color: 'var(--color-text-secondary)' }}>{candidate.email}</td>
                     <td>{candidate.role_applied}</td>
-                    <td><span className={statusBadgeClass(candidate.status)}>{candidate.status}</span></td>
+                    <td><StatusBadge status={candidate.status} /></td>
                     <td>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {(candidate.skills || []).map((skill) => (
@@ -476,23 +469,13 @@ export default function CandidateListPage() {
               ))}
             </select>
           </div>
-
-          <button className="btn btn-ghost"
-            disabled={page <= 1 || loading}
-            onClick={() => setPage(page - 1)}>
-            ← Previous
-          </button>
-
-          <span className="pagination-info">
-            Page {page} of {totalPages}
-            {totalCount > 0 && ` (${totalCount} total)`}
-          </span>
-
-          <button className="btn btn-ghost"
-            disabled={page >= totalPages || loading || totalPages === 0}
-            onClick={() => setPage(page + 1)}>
-            Next →
-          </button>
+          <PaginationFooter
+            page={page}
+            totalPages={totalPages}
+            totalCount={totalCount}
+            loading={loading}
+            onPageChange={setPage}
+          />
         </div>
         )}
       </div>

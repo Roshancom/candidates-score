@@ -207,6 +207,22 @@ a:hover {
   min-height: 80px;
 }
 
+/* Field-level error state */
+.form-input-error {
+  border-color: var(--color-danger) !important;
+}
+
+.form-input-error:focus {
+  box-shadow: 0 0 0 3px rgba(216, 80, 58, 0.15) !important;
+}
+
+.field-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
 /* ===== Status Badges ===== */
 
 .badge {

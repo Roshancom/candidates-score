@@ -1,7 +1,21 @@
 from datetime import datetime, timezone
+from enum import Enum
+
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text, Index
 from sqlalchemy.orm import relationship
 from app.database import Base, UtcDateTime
+
+
+class CandidateStatus(str, Enum):
+    """Allowed statuses for a candidate's lifecycle."""
+    NEW = "new"
+    REVIEWED = "reviewed"
+    HIRED = "hired"
+    REJECTED = "rejected"
+    ARCHIVED = "archived"
+
+
+VALID_STATUSES = {s.value for s in CandidateStatus}
 
 
 class Candidate(Base):
@@ -22,6 +36,8 @@ class Candidate(Base):
     deleted_at = Column(UtcDateTime, nullable=True)  # soft delete
     is_seed_data = Column(Integer, default=0)  # 0 = real, 1 = seed/test data
     seed_batch_id = Column(String(36), nullable=True)  # UUID batch identifier
+    ai_summary = Column(Text, nullable=True)  # Cached AI-generated summary
+    ai_summary_generated_at = Column(UtcDateTime, nullable=True)  # When summary was generated
 
     scores = relationship("Score", back_populates="candidate", cascade="all, delete-orphan")
     assigned_reviewer = relationship("User", foreign_keys=[assigned_reviewer_id])

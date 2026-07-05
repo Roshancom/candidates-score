@@ -1,8 +1,8 @@
-import json
 import os
 
-from app.models import Candidate
-from app.schemas import CandidateListItem
+from app.models import VALID_STATUSES
+from app.schemas import PaginationInfo
+from app.services.candidate_service import _parse_skills, _candidate_to_list_item
 
 # Path where uploaded CVs are stored
 # Current file: backend/app/routers/candidates/helpers.py
@@ -13,23 +13,15 @@ UPLOAD_DIR = os.path.join(
 )
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-VALID_STATUSES = {"new", "reviewed", "hired", "rejected", "archived"}
 
 
-def _parse_skills(candidate: Candidate) -> list:
-    try:
-        return json.loads(candidate.skills) if candidate.skills else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-def _candidate_to_list_item(candidate: Candidate) -> CandidateListItem:
-    return CandidateListItem(
-        id=candidate.id,
-        name=candidate.name,
-        email=candidate.email,
-        role_applied=candidate.role_applied,
-        status=candidate.status,
-        skills=_parse_skills(candidate),
-        created_at=candidate.created_at,
+def make_pagination(page: int, page_size: int, total_count: int) -> PaginationInfo:
+    """Build a PaginationInfo from page/page_size/total_count."""
+    total_pages = max(1, (total_count + page_size - 1) // page_size) if total_count > 0 else 0
+    return PaginationInfo(
+        page=page,
+        page_size=page_size,
+        total_count=total_count,
+        total_pages=total_pages,
     )
+

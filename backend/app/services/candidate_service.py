@@ -1,3 +1,4 @@
+import json
 import uuid
 import re
 from typing import Optional, List
@@ -6,9 +7,65 @@ from datetime import datetime, timezone
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.models import Candidate, Score, User
-from app.schemas import CandidateCreate, CandidateUpdate, ScoreCreate
+from app.models import Candidate, Score, User, VALID_STATUSES
+from app.schemas import (
+    CandidateCreate,
+    CandidateListItem,
+    CandidateDetail,
+    CandidateUpdate,
+    ScoreCreate,
+    ScoreResponse,
+)
 from app.schemas import ScoreUpdate as ScoreUpdateSchema
+
+
+from sqlalchemy.orm import Session, Query
+
+
+def _apply_candidate_filters(
+    query: Query,
+    status: Optional[str] = None,
+    role_applied: Optional[str] = None,
+    skill: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> Query:
+    """Apply common candidate filters (status, role_applied, skill, keyword) to a query."""
+    if status:
+        query = query.filter(Candidate.status == status)
+    if role_applied:
+        query = query.filter(Candidate.role_applied == role_applied)
+    if keyword:
+        query = query.filter(
+            or_(
+                Candidate.name.ilike(f"%{keyword}%"),
+                Candidate.email.ilike(f"%{keyword}%"),
+            )
+        )
+    if skill:
+        query = query.filter(Candidate.skills.ilike(f"%{skill}%"))
+    return query
+
+
+def _paginate_query(
+    query: Query,
+    page: int,
+    page_size: int,
+    order_col = None,
+    order_expr = None,
+) -> tuple:
+    """Apply pagination (count, offset, limit) to a query and return (results, total).
+    Provide either order_col (for simple descending sort) or order_expr (for custom ordering).
+    """
+    total = query.count()
+    page_size = min(max(page_size, 1), 50)
+    offset = (page - 1) * page_size
+    if order_expr is not None:
+        results = query.order_by(*order_expr).offset(offset).limit(page_size).all()
+    elif order_col is not None:
+        results = query.order_by(order_col.desc()).offset(offset).limit(page_size).all()
+    else:
+        results = query.offset(offset).limit(page_size).all()
+    return results, total
 
 
 def list_candidates(
@@ -25,32 +82,8 @@ def list_candidates(
     Never loads the full table into memory.
     """
     query = db.query(Candidate).filter(Candidate.deleted_at.is_(None))
-
-    # Apply filters at SQL level
-    if status:
-        query = query.filter(Candidate.status == status)
-    if role_applied:
-        query = query.filter(Candidate.role_applied == role_applied)
-    if keyword:
-        query = query.filter(
-            or_(
-                Candidate.name.ilike(f"%{keyword}%"),
-                Candidate.email.ilike(f"%{keyword}%"),
-            )
-        )
-    if skill:
-        # We store skills as JSON text; use LIKE for simple matching
-        query = query.filter(Candidate.skills.ilike(f"%{skill}%"))
-
-    # Get total count before pagination
-    total = query.count()
-
-    # Paginate at SQL level
-    page_size = min(max(page_size, 1), 50)
-    offset = (page - 1) * page_size
-    candidates = query.order_by(Candidate.created_at.desc()).offset(offset).limit(page_size).all()
-
-    return candidates, total
+    query = _apply_candidate_filters(query, status, role_applied, skill, keyword)
+    return _paginate_query(query, page, page_size, Candidate.created_at)
 
 
 def get_candidate(db: Session, candidate_id: int) -> Optional[Candidate]:
@@ -61,12 +94,29 @@ def get_candidate(db: Session, candidate_id: int) -> Optional[Candidate]:
     )
 
 
-import json
 
 def create_candidate(db: Session, data: CandidateCreate) -> Candidate:
+    # Normalize email to lowercase
+    email = data.email.strip().lower()
+
+    # Check email uniqueness (including soft-deleted candidates)
+    existing = db.query(Candidate).filter(
+        func.lower(Candidate.email) == email
+    ).first()
+    if existing:
+        raise ValueError(f"A candidate with email '{email}' already exists")
+
+    # If reviewer is assigned, validate they exist and have role=reviewer
+    if data.assigned_reviewer_id is not None:
+        reviewer = db.query(User).filter(User.id == data.assigned_reviewer_id).first()
+        if not reviewer:
+            raise ValueError("Assigned reviewer not found")
+        if reviewer.role != "reviewer":
+            raise ValueError("Assigned user is not a reviewer")
+
     candidate = Candidate(
-        name=data.name,
-        email=data.email,
+        name=data.name.strip(),
+        email=email,
         role_applied=data.role_applied,
         skills=json.dumps(data.skills),
         status="new",
@@ -86,6 +136,8 @@ def update_candidate(db: Session, candidate_id: int, data: CandidateUpdate) -> O
         return None
 
     if data.status is not None:
+        if data.status not in VALID_STATUSES:
+            raise ValueError(f"Invalid status '{data.status}'. Allowed: {', '.join(sorted(VALID_STATUSES))}")
         candidate.status = data.status
     if data.internal_notes is not None:
         candidate.internal_notes = data.internal_notes
@@ -140,27 +192,8 @@ def list_archived_candidates(
         Candidate.deleted_at.isnot(None),
         Candidate.is_seed_data == 0,  # Exclude seed data from archived list
     )
-
-    if status:
-        query = query.filter(Candidate.status == status)
-    if role_applied:
-        query = query.filter(Candidate.role_applied == role_applied)
-    if keyword:
-        query = query.filter(
-            or_(
-                Candidate.name.ilike(f"%{keyword}%"),
-                Candidate.email.ilike(f"%{keyword}%"),
-            )
-        )
-    if skill:
-        query = query.filter(Candidate.skills.ilike(f"%{skill}%"))
-
-    total = query.count()
-    page_size = min(max(page_size, 1), 50)
-    offset = (page - 1) * page_size
-    candidates = query.order_by(Candidate.deleted_at.desc()).offset(offset).limit(page_size).all()
-
-    return candidates, total
+    query = _apply_candidate_filters(query, status, role_applied, skill, keyword)
+    return _paginate_query(query, page, page_size, Candidate.deleted_at)
 
 
 def update_score(
@@ -202,13 +235,19 @@ def submit_score(
     data: ScoreCreate,
     reviewer_id: int,
 ) -> Optional[Score]:
-    candidate = get_candidate(db, candidate_id)
+    # Also include soft-deleted candidates in the check so we can reject archived ones
+    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
     if not candidate:
+        return None
+
+    # Reject scoring archived candidates
+    if candidate.status == "archived" or candidate.deleted_at is not None:
         return None
 
     # Check if this is the reviewer's first score (to trigger notification)
     existing_scores = get_scores_for_reviewer(db, candidate_id, reviewer_id)
     is_first_score = len(existing_scores) == 0
+    is_first_score_overall = candidate_has_any_scores(db, candidate_id) is False
 
     score = Score(
         candidate_id=candidate_id,
@@ -218,6 +257,11 @@ def submit_score(
         reviewer_id=reviewer_id,
     )
     db.add(score)
+
+    # Auto-transition: new -> reviewed on first overall score submission
+    if is_first_score_overall and candidate.status == "new":
+        candidate.status = "reviewed"
+
     db.commit()
     db.refresh(score)
 
@@ -266,12 +310,8 @@ def list_candidates_for_reviewer(
         )
     )
 
-    total = query.count()
-    page_size = min(max(page_size, 1), 50)
-    offset = (page - 1) * page_size
-    candidates = query.order_by(Candidate.assigned_date.desc().nullslast(), Candidate.created_at.desc()).offset(offset).limit(page_size).all()
-
-    return candidates, total
+    order = Candidate.assigned_date.desc().nullslast(), Candidate.created_at.desc()
+    return _paginate_query(query, page, page_size, order_expr=order)
 
 
 def candidate_has_any_scores(db: Session, candidate_id: int) -> bool:
@@ -327,7 +367,11 @@ def seed_candidates(db: Session, count: int = 80, batch_id: Optional[str] = None
         "Security Engineer",
         "Solutions Architect",
     ]
-    statuses = ["new", "reviewed", "hired", "rejected"]
+    # Only use 'new' for seed data to accurately reflect the lifecycle:
+    # seeded candidates have no scores, so they should all start as 'new'.
+    # Reviewed/hired/rejected statuses imply review activity which isn't
+    # present for seed data unless we also generate matching scores.
+    statuses = ["new"]
     skill_pool = [
         "Python", "JavaScript", "TypeScript", "React", "Vue.js", "Angular",
         "Node.js", "FastAPI", "Django", "Flask", "PostgreSQL", "MongoDB",
@@ -385,6 +429,68 @@ def delete_seed_candidates(db: Session, batch_id: Optional[str] = None) -> int:
 def count_seed_candidates(db: Session) -> int:
     """Count how many seed data candidates exist."""
     return db.query(Candidate).filter(Candidate.is_seed_data == 1).count()
+
+
+def _parse_skills(candidate: Candidate) -> list:
+    """Parse skills JSON string with error handling."""
+    try:
+        return json.loads(candidate.skills) if candidate.skills else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _candidate_to_list_item(candidate: Candidate) -> CandidateListItem:
+    """Convert a Candidate model to a CandidateListItem schema."""
+    return CandidateListItem(
+        id=candidate.id,
+        name=candidate.name,
+        email=candidate.email,
+        role_applied=candidate.role_applied,
+        status=candidate.status,
+        skills=_parse_skills(candidate),
+        created_at=candidate.created_at,
+    )
+
+
+def serialize_candidate_detail(
+    db: Session,
+    candidate: Candidate,
+    current_user: User,
+) -> CandidateDetail:
+    """
+    Build a CandidateDetail response respecting RBAC:
+    - Admin sees all scores, internal_notes
+    - Reviewer sees only their own scores, no internal_notes
+    """
+    # RBAC: admin sees all scores, reviewer sees only their own
+    if current_user.role == "admin":
+        scores = get_scores_for_candidate(db, candidate.id)
+        internal_notes = candidate.internal_notes
+    else:
+        scores = get_scores_for_reviewer(db, candidate.id, current_user.id)
+        internal_notes = None
+
+    is_reviewed = (
+        has_reviewer_submitted_scores(db, candidate.id, current_user.id)
+        if current_user.role == "reviewer"
+        else False
+    )
+
+    return CandidateDetail(
+        id=candidate.id,
+        name=candidate.name,
+        email=candidate.email,
+        role_applied=candidate.role_applied,
+        status=candidate.status,
+        skills=_parse_skills(candidate),
+        internal_notes=internal_notes,
+        cv_file_url=candidate.cv_file_url,
+        is_reviewed_by_current_user=is_reviewed,
+        created_at=candidate.created_at,
+        scores=[ScoreResponse.model_validate(s) for s in scores],
+        ai_summary=candidate.ai_summary,
+        ai_summary_generated_at=candidate.ai_summary_generated_at,
+    )
 
 
 def get_candidates_average_scores(db: Session, candidate_ids: list[int]) -> dict[int, tuple[Optional[float], int]]:

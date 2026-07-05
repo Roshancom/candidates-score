@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
 
@@ -86,8 +86,26 @@ class CandidateDetail(BaseModel):
     is_reviewed_by_current_user: bool = False
     created_at: datetime
     scores: List[ScoreResponse] = []
+    ai_summary: Optional[str] = None
+    ai_summary_generated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+ALLOWED_ROLES = {
+    "Senior Frontend Engineer",
+    "Backend Engineer",
+    "Full Stack Developer",
+    "DevOps Engineer",
+    "Data Engineer",
+    "Software Engineer",
+    "Machine Learning Engineer",
+    "Product Manager",
+    "QA Engineer",
+    "Mobile Developer",
+    "Security Engineer",
+    "Solutions Architect",
+}
 
 
 class CandidateCreate(BaseModel):
@@ -96,6 +114,58 @@ class CandidateCreate(BaseModel):
     role_applied: str
     skills: List[str] = []
     assigned_reviewer_id: Optional[int] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Name is required")
+        if len(v) > 100:
+            raise ValueError("Name must be 100 characters or fewer")
+        if not any(c.isalpha() for c in v):
+            raise ValueError("Name must contain at least one letter")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, v):
+        import re
+        v = v.strip().lower()
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
+            raise ValueError("Invalid email format")
+        return v
+
+    @field_validator("role_applied")
+    @classmethod
+    def validate_role_applied(cls, v):
+        if v not in ALLOWED_ROLES:
+            raise ValueError(
+                f"Invalid role '{v}'. Allowed: {', '.join(sorted(ALLOWED_ROLES))}"
+            )
+        return v
+
+    @field_validator("skills")
+    @classmethod
+    def validate_skills(cls, v):
+        # Trim whitespace, remove empty entries
+        skills = [s.strip() for s in v if s and s.strip()]
+        if not skills:
+            raise ValueError("At least one skill is required")
+        # Deduplicate case-insensitively, preserving order
+        seen = set()
+        deduped = []
+        for s in skills:
+            key = s.lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(s)
+        if len(deduped) > 20:
+            raise ValueError("Maximum 20 skills allowed")
+        for s in deduped:
+            if len(s) > 50:
+                raise ValueError(f"Skill '{s}' exceeds 50 character limit")
+        return deduped
 
 
 class CandidateUpdate(BaseModel):
@@ -114,6 +184,11 @@ class PaginationInfo(BaseModel):
 
 class CandidateListResponse(BaseModel):
     data: List[CandidateListItem]
+    pagination: PaginationInfo
+
+
+class ReviewCandidateListResponse(BaseModel):
+    data: List[ReviewCandidateListItem]
     pagination: PaginationInfo
 
 

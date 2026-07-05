@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../api/auth';
 import { getNotifications, markNotificationsRead } from '../api/client';
+import { API_BASE } from '../config';
 
 export default function NotificationBell() {
   const { apiFetch } = useAuth();
@@ -25,12 +26,50 @@ export default function NotificationBell() {
     }
   }, [apiFetch]);
 
-  // Fetch on mount
+  // Fetch on mount via SSE with polling fallback
   useEffect(() => {
     fetchNotifications();
-    // Refresh every 30 seconds
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
+
+    const token = localStorage.getItem('token');
+    let eventSource = null;
+    let pollingInterval = null;
+
+    try {
+      eventSource = new EventSource(`${API_BASE}/notifications/stream?token=${token}`);
+
+      eventSource.addEventListener('notification', (e) => {
+        try {
+          const notif = JSON.parse(e.data);
+          setNotifications((prev) => [notif, ...prev]);
+          setUnreadCount((prev) => prev + 1);
+        } catch {
+          // Ignore malformed events
+        }
+      });
+
+      eventSource.onerror = () => {
+        // SSE connection failed — fall back to polling
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        if (!pollingInterval) {
+          pollingInterval = setInterval(fetchNotifications, 30000);
+        }
+      };
+    } catch {
+      // EventSource not supported — fall back to polling
+      pollingInterval = setInterval(fetchNotifications, 30000);
+    }
+
+    return () => {
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+    };
   }, [fetchNotifications]);
 
   // Close dropdown when clicking outside
